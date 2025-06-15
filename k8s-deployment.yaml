@@ -1,0 +1,242 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chest-analyzer-service
+  namespace: fature
+  labels:
+    app: chest-analyzer-service
+    component: gamification
+    version: v1.0.0
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: chest-analyzer-service
+  template:
+    metadata:
+      labels:
+        app: chest-analyzer-service
+        component: gamification
+    spec:
+      containers:
+      - name: chest-analyzer
+        image: fature/chest-analyzer-service:latest
+        ports:
+        - containerPort: 5000
+          name: http
+        env:
+        - name: REDIS_HOST
+          value: "redis.fature.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: CONFIG_SERVICE_URL
+          value: "http://config-service.fature.svc.cluster.local"
+        - name: FLASK_ENV
+          value: "production"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "800m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+          readOnly: true
+      volumes:
+      - name: config-volume
+        configMap:
+          name: chest-analyzer-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chest-analyzer-service
+  namespace: fature
+  labels:
+    app: chest-analyzer-service
+spec:
+  selector:
+    app: chest-analyzer-service
+  ports:
+  - port: 80
+    targetPort: 5000
+    protocol: TCP
+    name: http
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chest-analyzer-config
+  namespace: fature
+  labels:
+    app: chest-analyzer-service
+data:
+  config.yaml: |
+    # Configurações do serviço de análise de baús
+    analyzer:
+      cache_ttl_seconds: 300
+      batch_size_limit: 100
+      thread_pool_size: 10
+      confidence_threshold: 0.7
+    
+    performance:
+      enable_async_processing: true
+      max_concurrent_analyses: 50
+      timeout_seconds: 30
+    
+    redis:
+      connection_timeout: 5
+      socket_timeout: 5
+      retry_on_timeout: true
+      max_connections: 20
+    
+    logging:
+      level: INFO
+      format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+      enable_performance_logs: true
+    
+    monitoring:
+      metrics_enabled: true
+      health_check_interval: 30
+      performance_tracking: true
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chest-analyzer-service-netpol
+  namespace: fature
+spec:
+  podSelector:
+    matchLabels:
+      app: chest-analyzer-service
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: user-service
+    - podSelector:
+        matchLabels:
+          app: gamification-service
+    - podSelector:
+        matchLabels:
+          app: commission-service
+    ports:
+    - protocol: TCP
+      port: 5000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to:
+    - podSelector:
+        matchLabels:
+          app: config-service
+    ports:
+    - protocol: TCP
+      port: 80
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chest-analyzer-service-hpa
+  namespace: fature
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: chest-analyzer-service
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chest-analyzer-service-pdb
+  namespace: fature
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: chest-analyzer-service
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: chest-analyzer-service-monitor
+  namespace: fature
+  labels:
+    app: chest-analyzer-service
+spec:
+  selector:
+    matchLabels:
+      app: chest-analyzer-service
+  endpoints:
+  - port: http
+    path: /api/v1/metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
